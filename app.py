@@ -5,10 +5,49 @@ import openai
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+import io
+
+SCOPES = ['https://www.googleapis.com/auth/drive']
+SERVICE_ACCOUNT_FILE = 'service_account.json'
+PARENT_FOLDER_ID = "1P1I2RBsj48aaPiSJsg8c6HWxkdjd5MNF"
+
+def authenticate():
+    creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    return creds
+
+def upload_file(file_path):
+    creds = authenticate()
+    service = build('drive', 'v3', credentials=creds)
+    file_metadata = {
+        'name': os.path.basename(file_path),
+        'parents': [PARENT_FOLDER_ID]
+    }
+    media = MediaFileUpload(file_path, mimetype='application/pdf')
+    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+    return file.get('id')  # Return the file ID after upload
+
+def download_file(file_id):
+    creds = authenticate()
+    service = build('drive', 'v3', credentials=creds)
+    
+    # Create a request to download the file
+    request = service.files().get_media(fileId=file_id)
+    file_data = io.BytesIO()  # Use BytesIO to handle the file in memory
+    downloader = MediaIoBaseDownload(file_data, request)
+    
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    
+    file_data.seek(0)  # Move to the beginning of the file stream
+    return file_data
 
 app = Flask(__name__)
 
-openai.api_key = "sk-k3zyHHs9XvVbuAUtGDUoi2khs90H0ZJSvWL1URRNVKT3BlbkFJmUYRkzNevySXzwfKNqt7n-hKu-cU1lngdUhL9kueUA"
+openai.api_key = "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"
 
 # Database configuration
 DATABASE_URL = "postgresql://StudySphere_owner:0mxFNCK2OTpP@ep-gentle-sound-a2sptgrr.eu-central-1.aws.neon.tech/StudySphere?sslmode=require"
@@ -38,11 +77,21 @@ def index():
     if request.method == 'POST':
         file = request.files['file']
         if file:
+            # Save file locally temporarily to upload to Google Drive
             pdf_file_path = os.path.join('uploads', file.filename)
             file.save(pdf_file_path)
 
-            # Read the PDF file and count the tokens
-            pdf_reader = PyPDF2.PdfReader(pdf_file_path)
+            # Upload file to Google Drive
+            google_drive_file_id = upload_file(pdf_file_path)
+
+            # Delete the local file after upload
+            os.remove(pdf_file_path)
+
+            # Download the file from Google Drive
+            file_data = download_file(google_drive_file_id)
+
+            # Use PyPDF2 to read the file from memory
+            pdf_reader = PyPDF2.PdfReader(file_data)
             total_tokens = 0
             pdf_text = ""
 
@@ -53,7 +102,6 @@ def index():
 
             # Check token limit
             if total_tokens > TOKEN_LIMIT:
-                os.remove(pdf_file_path)
                 return render_template('index.html', error="File is too large")
 
             # Call OpenAI API to summarize text
@@ -72,7 +120,7 @@ def index():
             session.add(new_summary)
             session.commit()
 
-            return render_template('index.html', summary=summary)
+            return render_template('index.html', summary=summary, drive_file_id=google_drive_file_id)
 
     return render_template('index.html')
 
