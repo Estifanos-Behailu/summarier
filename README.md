@@ -1,4 +1,4 @@
-# Flask PDF Summarizer with Google Drive and OpenAI Integration
+# PDF Summarizer with OpenAI
 
 This is a Flask web application that allows users to upload PDF files, upload them to Google Drive, and use OpenAI's GPT-4 to generate a summary of the PDF content. The summary is then stored in a PostgreSQL database for future reference.
 Features
