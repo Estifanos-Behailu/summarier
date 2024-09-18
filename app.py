@@ -9,6 +9,8 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import io
+import time
+from sqlalchemy.exc import OperationalError, PendingRollbackError
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
 SERVICE_ACCOUNT_FILE = 'service_account.json'
@@ -77,52 +79,67 @@ def index():
     if request.method == 'POST':
         file = request.files['file']
         if file:
-            # Save file locally temporarily to upload to Google Drive
-            pdf_file_path = os.path.join('uploads', file.filename)
-            file.save(pdf_file_path)
+            try:
+                # Save file locally temporarily to upload to Google Drive
+                pdf_file_path = os.path.join('uploads', file.filename)
+                file.save(pdf_file_path)
 
-            # Upload file to Google Drive
-            google_drive_file_id = upload_file(pdf_file_path)
+                # Upload file to Google Drive
+                google_drive_file_id = upload_file(pdf_file_path)
 
-            # Delete the local file after upload
-            os.remove(pdf_file_path)
+                # Delete the local file after upload
+                os.remove(pdf_file_path)
 
-            # Download the file from Google Drive
-            file_data = download_file(google_drive_file_id)
+                # Download the file from Google Drive
+                file_data = download_file(google_drive_file_id)
 
-            # Use PyPDF2 to read the file from memory
-            pdf_reader = PyPDF2.PdfReader(file_data)
-            total_tokens = 0
-            pdf_text = ""
+                # Use PyPDF2 to read the file from memory
+                pdf_reader = PyPDF2.PdfReader(file_data)
+                total_tokens = 0
+                pdf_text = ""
 
-            for page_num in range(len(pdf_reader.pages)):
-                page_text = pdf_reader.pages[page_num].extract_text()
-                total_tokens += len(page_text.split())
-                pdf_text += page_text.lower()
+                for page_num in range(len(pdf_reader.pages)):
+                    page_text = pdf_reader.pages[page_num].extract_text()
+                    total_tokens += len(page_text.split())
+                    pdf_text += page_text.lower()
 
-            # Check token limit
-            if total_tokens > TOKEN_LIMIT:
-                return render_template('index.html', error="File is too large")
+                # Check token limit
+                if total_tokens > TOKEN_LIMIT:
+                    return render_template('index.html', error="File is too large")
 
-            # Call OpenAI API to summarize text
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are a helpful research assistant."},
-                    {"role": "user", "content": f"Summarize this: {pdf_text}"},
-                ],
-            )
+                # Call OpenAI API to summarize text
+                response = openai.ChatCompletion.create(
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful research assistant."},
+                        {"role": "user", "content": f"Summarize this: {pdf_text}"},
+                    ],
+                )
 
-            summary = response["choices"][0]["message"]["content"]
+                summary = response["choices"][0]["message"]["content"]
 
-            # Save the summary to the database
-            new_summary = Summary(filename=file.filename, summary=summary)
-            session.add(new_summary)
-            session.commit()
+                # Save the summary to the database with error handling
+                retries = 3
+                while retries > 0:
+                    try:
+                        new_summary = Summary(filename=file.filename, summary=summary)
+                        session.add(new_summary)
+                        session.commit()
+                        break
+                    except OperationalError as e:
+                        session.rollback()
+                        retries -= 1
+                        time.sleep(2)  # Wait and retry
+                        if retries == 0:
+                            raise e  # Reraise the exception if all retries failed
 
-            return render_template('index.html', summary=summary, drive_file_id=google_drive_file_id)
+                return render_template('index.html', summary=summary, drive_file_id=google_drive_file_id)
+
+            except Exception as e:
+                session.rollback()  # Ensure rollback on any unhandled exception
+                return render_template('index.html', error=f"An error occurred: {str(e)}")
 
     return render_template('index.html')
 
 if __name__ == '__main__':
-    app.run(debug=False,host='0.0.0.0')
+    app.run(debug=False, host='0.0.0.0')
